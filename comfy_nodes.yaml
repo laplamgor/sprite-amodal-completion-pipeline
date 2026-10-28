@@ -1,0 +1,14 @@
+# Extra custom_nodes path, loaded by ComfyUI through --extra-model-paths-config
+# (passed in start_server.bat). `folder_paths.add_model_folder_path` accepts any
+# key it already knows, and `custom_nodes` is one of them, so ComfyUI's startup
+# scan picks this folder up alongside its own ComfyUI/custom_nodes.
+#
+# The pack lives in the repo so its source is versioned with the code that builds
+# the graphs. The path is resolved relative to THIS file, so moving the portable
+# install or the repo needs no edit here.
+#
+# Must point at a folder that contains only node packs: ComfyUI imports every
+# top-level *.py in a custom_nodes path, so naming the repo root would make it
+# import config.py and run_folder.py at startup.
+pipeline_nodes:
+    custom_nodes: comfy_nodes
