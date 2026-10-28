@@ -1,0 +1,29 @@
+{
+ "_comment": "User's hand-ranked ground truth. tier 0 = largest bust, tier 5 = not visible (assume small/flat). Within a tier the images are equivalent.",
+ "tiers": [
+  {"tier": 0, "label": "cannot be larger",
+   "stems": ["0297_2233_jhefpwucyxiq_v55", "0634_5865_ugieenlacpcu_v132",
+             "0639_1493_cokndlimiunf_v132", "0878_8851_qubrmuvhbhim_v76"]},
+  {"tier": 1, "label": "very large",
+   "stems": ["0108_3636_wlvvcpnulyer_v55", "0932_9199_gwxkvtmkxmsr_v52"]},
+  {"tier": 2, "label": "average (anime C-D)",
+   "stems": ["0497_9892_zeebmcpibdkn_v74", "0090_1693_nppdykjbwmkx_v39",
+             "0687_2785_kxqxnneqrcpg_v92", "0707_2737_mloskuljwgtb_v121",
+             "0742_5709_yswnykcgazhe_v52", "0902_9847_biobxgnkjnzi_v51",
+             "0942_2426_zpotllltncez_v62"]},
+  {"tier": 3, "label": "small but not flat",
+   "stems": ["0018_5360_louolngpmrwj_v72", "0564_5829_fvsfztikmgyk_v115",
+             "0158_3589_qpnrcirsvqcr_v42", "0231_8335_wnocckxgfmnh_v139",
+             "0329_4603_qegrehgswrpg_v30", "0528_1165_kflfismselum_v101",
+             "0578_8623_zzahenrypate_v97", "0981_7034_wziuqfplfcgx_v68"]},
+  {"tier": 4, "label": "flat",
+   "stems": ["0443_3043_nsutzbtifaji_v95", "0381_9836_ekhgotryrtbd_v78",
+             "0248_8377_xbbfxeemifpv_v27", "0201_2775_dufziinsornt_v60",
+             "0394_4358_ejdfsurhnkbu_v54", "0414_4637_xthvimkarzgq_v56",
+             "0539_3778_jisyljtqgqcj_v57", "0547_6680_pcmipikyqfxe_v83"]},
+  {"tier": 5, "label": "not visible (assume small-flat)",
+   "stems": ["0722_7804_hbbpfodwvfop_v66", "0653_8467_lovonbimvdow_v89",
+             "1010_7156_jimldgofdvhl_v68", "0958_6353_zsnmjonjfpan_v79",
+             "0479_5617_xvgcgmwruygk_v83", "0921_8800_vjfdvbocwmtd_v81"]}
+ ]
+}
