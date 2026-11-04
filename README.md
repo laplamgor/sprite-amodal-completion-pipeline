@@ -1,4 +1,4 @@
-# sprite-amodal-completion-pipeline
+﻿# sprite-amodal-completion-pipeline
 
 A batch pipeline for **amodal completion** of transparent-background character
 art: the clothing regions are re-synthesised as bare skin, while pose, identity,
@@ -24,6 +24,7 @@ ComfyUI_windows_portable_v043/
 │  ├─ run_folder.py          batch entry point
 │  ├─ vlm_axes.py            per-image body/style axes from Qwen2.5-VL
 │  ├─ bust_measure.py        chest size from a purpose-trained detector
+│  ├─ view_axis.py           front/back gate: booru tagger + Qwen3-VL-4B
 │  ├─ rederive.py            calibrated prompt renderer
 │  ├─ depth_prepass.py       DA3 depth maps (input for image_profile)
 │  ├─ image_profile.py       measured per-image body profile
@@ -31,9 +32,11 @@ ComfyUI_windows_portable_v043/
 │  ├─ comfy_client.py        ComfyUI HTTP helpers (submit / wait / history)
 │  ├─ evaluate.py            IoU + alpha QA, contact sheets
 │  ├─ models/breast_size_y11m.pt   chest detector weights (39 MB)
+│  ├─ models/wd-swinv2-tagger-v3.onnx   booru tagger weights (467 MB)
 │  ├─ input/                 source PNGs, flat      (gitignored)
 │  ├─ output/                <stem>_amodal.png      (gitignored)
 │  │  ├─ axes/               <stem>.json   ← vlm_axes → rederive
+│  │  │                       _views.json   ← view_axis → run_folder --view-gate
 │  │  ├─ bust/               <stem>.json   ← bust_measure → rederive
 │  │  ├─ depth/              <stem>.png    ← depth_prepass
 │  │  └─ profiles/           <stem>.json   ← image_profile
@@ -58,6 +61,9 @@ ComfyUI_windows_portable_v043/
 | matting | `birefnet.safetensors` |
 | depth | `depth_anything_3_base.safetensors` (in `models/geometry_estimation/`) |
 | flat-chest LoRA | `Eva_Flat_Chest.safetensors` (in `models/loras/`) — auto-applied below 0.26 bust |
+| chest detector | `models/breast_size_y11m.pt` (in this repo) |
+| booru tagger | `models/wd-swinv2-tagger-v3.onnx` (in this repo, for `view_axis.py`) |
+| view gate VLM | `Qwen/Qwen3-VL-4B-Instruct` (HF cache, ~8.6 GB, only loaded when the tagger flags an image) |
 
 They are read through `ComfyUI/extra_model_paths.yaml`, so the weights can live
 in another ComfyUI install.
@@ -79,10 +85,18 @@ cd C:\Users\user\Desktop\SDXL\ComfyUI_windows_portable_v043\sprite-amodal-comple
 ..\python_embeded\python.exe depth_prepass.py
 ..\python_embeded\python.exe vlm_axes.py
 ..\python_embeded\python.exe bust_measure.py
+..\python_embeded\python.exe view_axis.py       # writes output/axes/_views.json
 ..\python_embeded\python.exe rederive.py --refit
 
 # 3. render
-..\python_embeded\python.exe run_folder.py --axes --no-profile --chunk 7 --force
+..\python_embeded\python.exe run_folder.py --view-gate --axes --no-profile --chunk 7 --force
+```
+
+Back-facing sources take the back branch when the gate fires. The one back the
+gate misses — 0313, where the 4B reads a chest — goes on the list by hand:
+
+```powershell
+..\python_embeded\python.exe run_folder.py --assume-back 0313 --view-gate --axes --no-profile --chunk 7 --force
 ```
 
 `start_server.bat` blocks its window, so step 2 and 3 need a second one. The
@@ -114,6 +128,7 @@ The pre-pass scripts are separate because they are expensive and cached:
 | `depth_prepass.py` | `output/depth/<stem>.png` | `image_profile.py` |
 | `vlm_axes.py` | `output/axes/<stem>.json` | `rederive.py` → `run_folder.py` |
 | `bust_measure.py` | `output/bust/<stem>.json` | `rederive.py` |
+| `view_axis.py` | `output/axes/_views.json` | `run_folder.py --view-gate` |
 | `rederive.py` | `parts_cal` + `style` in the same JSON | `run_folder.py --axes` |
 | `image_profile.py` | `output/profiles/<stem>.json` | `run_folder.py` (off with `--no-profile`) |
 
@@ -140,6 +155,9 @@ redrawn older, taller or in a different outfit gets its own parameters.
 | `--force` | off | re-render even if `_amodal.png` exists |
 | `--only` | — | substring filter on filenames |
 | `--axes` | off | append `parts_cal` + `style` from `output/axes` |
+| `--view-gate` | off | back views (tagger) get the back branch; the chest clause still describes the measured size, the low-bust tags/LoRA do not |
+| `--assume-back` | — | stems to force onto the back branch (substring match) |
+| `--back-denoise` | 1.0 | denoise for back views; no-op above 0.80 at 4 steps (ADR-0008), A/B only |
 | `--no-profile` | off | skip the `image_profile` sentence |
 | `--max-mp` | 1.5 | canvas megapixel cap (`1.0` ≈ 33 % faster) |
 | `--sam-refine` | 2 | SAM3 refinement iterations per probe |
@@ -148,6 +166,7 @@ redrawn older, taller or in a different outfit gets its own parameters.
 | `--parse` | off | add the segformer clothing mask |
 | `--hair-protect` | off | subtract the SAM3 hair mask |
 | `--no-footwear-protect` | off | stop protecting shoes/boots |
+| `--no-equipment-protect` | off | stop protecting weapons, bags and worn gear |
 | `--denoise` | 1.0 | sampler denoise inside the clothing mask |
 | `--grow` | 16 | mask dilation, px |
 | `--protect-threshold` | — | SAM3 score threshold for protected regions |
@@ -215,12 +234,55 @@ by an arm, a prop or loose clothing.
 | detector, full + torso averaged | **0.91** (0.905 held out, 5-fold) |
 
 ```powershell
-..\python_embeded\python.exe bust_measure.py           # writes input/bust/<stem>.json
+..\python_embeded\python.exe bust_measure.py           # writes output/bust/<stem>.json
 ..\python_embeded\python.exe bust_measure.py --report  # print the ranking only
 ```
 
 Output is `bust` on 0..1, where 0.5 is the anime "average" of C/D cup. `rederive.py`
 overrides the VLM `bust` axis with it wherever a measurement exists.
+
+### `view_axis.py`
+
+Decides which sources are back-facing, so `run_folder.py --view-gate` can stop
+asserting a chest that is not visible. One instrument: WD SwinV2 v3, floor
+`from_behind >= 0.01`.
+
+| image | `from_behind` | truth |
+|---|---|---|
+| 0228 | 0.597 | back |
+| 0313 | 0.488 | back |
+| 0941 | 0.462 | back |
+| 0584 | 0.436 | back |
+| 0450 | 0.374 | back |
+| 0878 | 0.263 | back (3/4) |
+| 0479 | 0.083 | back |
+| 0958 | 0.019 | back (3/4) |
+| 0390 | 0.011 | mixed (upper back, hips front) |
+| all other fronts | <= 0.003 | front |
+
+8 of 8 backs, no fronts, 1 of 1 mixed. The whole safety margin is 0.019 -> 0.003,
+so the floor is fitted to this corpus and has to be re-read when a new batch
+lands. `_views.json` keeps the score per stem, so that is a one-line check.
+
+The VLM is **not** consulted. Qwen3-VL-4B finds only 5 of the 8 backs (0313,
+0450, 0941 read as chests) and its one front-side "back" (0653) is already below
+the tagger floor; the 8B scores the same 5 of 8, and Thinking buys nothing. So
+the conjunction was strictly worse than the tagger alone. `--vlm` still records
+its answer for inspection.
+
+```json
+"0479_5617_xvgcgmwruygk_v83": {"view": "back", "candidate": true,
+                               "from_behind": 0.083, "breasts": 0.021, "vlm": null}
+```
+
+```powershell
+..\python_embeded\python.exe view_axis.py            # all sources
+..\python_embeded\python.exe view_axis.py --only 0479 --force
+..\python_embeded\python.exe view_axis.py --vlm      # also record the 4B (~8.6 GB)
+```
+
+A new "back" hit is a hint worth one look, not ground truth: four positives is
+not a calibrated classifier.
 
 ### `rederive.py`
 

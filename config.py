@@ -45,6 +45,11 @@ PROFILES = str(HERE / "output" / "profiles")     # image_profile.py cache
 DEPTH = str(HERE / "output" / "depth")           # depth_prepass.py
 WORKFLOWS = str(COMFY / "user" / "default" / "workflows")  # generated UI graph
 
+# --- weights ------------------------------------------------------------
+# Kept in the repo next to the code, not in the ComfyUI model host: only these
+# scripts load them.
+MODELS = str(HERE / "models")                    # detector + tagger weights
+
 # --- server -------------------------------------------------------------
 HOST = "http://127.0.0.1:8199"
 

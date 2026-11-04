@@ -183,6 +183,12 @@ def frame_terms(axes, chest_len=0):
 
 
 def render(scaled, axes, stem="", variant=None, cap=3):
+    """Prompt parts for one image, plus the chest clause it used.
+
+    The chest clause is returned separately because `run_folder.py` drops it on
+    back views with no measurable bust (see BACK_BUST_MIN there): on a back the
+    detector reads the missing chest as "flat", and asserting that is wrong.
+    """
     bust = axes.get("bust", 0.5)
     chest = chest_terms(bust, stem, variant)
     parts = chest + frame_terms(axes, len(chest))
@@ -231,7 +237,7 @@ def render(scaled, axes, stem="", variant=None, cap=3):
         if p not in seen:
             seen.add(p)
             uniq.append(p)
-    return uniq
+    return uniq, chest
 
 
 def style_terms(axes, cap=2):
@@ -299,8 +305,11 @@ def main():
                     help="force one chest phrasing (0-3) instead of per-image")
     a = ap.parse_args()
 
+    # Side files in this folder start with "_" (`_calibration.json`, `_views.json`);
+    # everything else is a per-stem axes record. Glob the convention, not one name,
+    # so a new side file cannot break `--refit` again.
     files = [f for f in sorted(glob.glob(os.path.join(AX, "*.json")))
-             if not f.endswith("_calibration.json")]
+             if not os.path.basename(f).startswith("_")]
     data = {}
     for f in files:
         with open(f, encoding="utf-8") as fh:
@@ -360,7 +369,7 @@ def main():
 
     print("\n%-24s %5s %5s %5s  %s" % ("stem", "bust", "build", "prop", "prompt"))
     for stem, ax in data.items():
-        parts = render(scaled[stem], cal_axes[stem], stem, a.chest_variant)
+        parts, chest = render(scaled[stem], cal_axes[stem], stem, a.chest_variant)
         style = style_terms(ax)
         print("\n%-24s %5.2f %5.2f %5.2f" % (
             stem[:24], ax.get("bust", 0.5), build_cal[stem],
@@ -372,6 +381,7 @@ def main():
         with open(path, encoding="utf-8") as fh:
             rec = json.load(fh)
         rec["parts_cal"] = parts
+        rec["chest"] = chest
         rec["style"] = style
         rec["scaled"] = scaled[stem]
         rec["build_cal"] = round(build_cal[stem], 3)

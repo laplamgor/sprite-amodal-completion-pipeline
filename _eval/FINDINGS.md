@@ -1,4 +1,4 @@
-> **Record, not tooling.** The experiment harnesses named below (`probe.py`, `think.py`,
+﻿> **Record, not tooling.** The experiment harnesses named below (`probe.py`, `think.py`,
 > `score_hand.py`, `handrank.py`, `normalize.py`, `leverage.py`) were removed once the
 > axis work closed; the pipeline does not import or need them. What remains here is the
 > argument for the axes as shipped, plus the two label files those numbers came from:
@@ -390,3 +390,129 @@ Masks compared pixel-wise on all three images, edited and protection unions:
 Correction to section 10 and to the README: "bigger chunks amortise reloads" was
 false before this change, and the earlier ~68 min / 100 images estimate was
 ~138 min.
+
+## 12. Back-facing sources: prompt routing, and the 4-step denoise quantum
+
+0479 has the torso away from the camera (head over the shoulder, long sleeves).
+The shipped front prompt rebuilds it as a front with both arms swapped. Five
+levers, one image, same seed / 4 steps / chunk 1:
+
+| render | low-bust branch | prompt | denoise | result |
+|---|---|---|---|---|
+| baseline | on | front | 1.0 | front torso, breasts, arms re-synthesised |
+| (1) | off | front | 1.0 | still front, chest larger than baseline |
+| (1)+(2) | off | back | 1.0 | back, arms in the source pose |
+| (1)+(2)+(3) | off | back | 0.85 | byte-identical pixels to (1)+(2) |
+| (1)+(2)+(3) | off | back | 0.80 | back, but sleeve shading survives (arm warmers) |
+
+Why 0.85 did nothing: `KSampler.set_steps` uses `new_steps = int(steps/denoise)`
+then keeps the last `steps+1` sigmas. At 4 steps, `int(4/0.85) = 4`, so the
+schedule is identical to denoise 1.0. 0.80 gives `int(4/0.8) = 5` -- the first
+setting that changes anything. This also re-reads ADR-0008's "denoise 0.90 =
+0.00": that arm never changed the schedule.
+
+View detection: the 3B VLM is unusable here. Letter options gave p(back) 0.10-0.52
+on 0479 over five phrasings; teacher-forced continuations 0.09; greedy answers
+called 8/20 images "back"; the directive phrasing called 20/20 "back". WD SwinV2
+v3 tags separate it: `from_behind` 0.08 / `breasts` 0.02 on 0479, `from_behind`
+<= 0.02 or `breasts` >= 0.21 on the other 19. 0878 is the reason both terms are
+required (from_behind 0.26, breasts 0.92, front-facing crawl).
+
+Gate = `from_behind >= 0.05 and breasts < 0.20`, written to
+`output/axes/_views.json`.
+
+The labels took three passes. The first two were mine and wrong: 0313 was read
+as a front (flat sailor back panel read as a chest) and 0878 as a front (a crawl
+where the chest is visible from the side). The operator corrected both. Ground
+truth for the whole thread:
+
+| stem | truth | from_behind | breasts | 4B-Instruct | 4B-Thinking |
+|---|---|---|---|---|---|
+| 0479 | back | 0.083 | 0.021 | back | back |
+| 0878 | back (3/4) | 0.263 | 0.923 | back | back |
+| 0958 | back (3/4) | 0.019 | 0.072 | back | back |
+| 0313 | back | 0.488 | 0.007 | **chest** | **chest** |
+| 0653 | front (hips turned) | 0.002 | 0.029 | **back** | **back** |
+
+Every other front in the 22 scores `from_behind` <= 0.003.
+
+| instrument | backs found (of 4) | false backs (of 18 fronts) |
+|---|---|---|
+| WD tagger, `from_behind >= 0.01` | **4** | **0** |
+| Qwen3-VL-4B | 3 (misses 0313) | 1 (0653) |
+| tagger and 4B | 3 (misses 0313) | 0 |
+
+The floor sits in a 0.002-0.019 gap; it separates this corpus perfectly and will
+not survive the next one. The `breasts < 0.20` veto was fitted to the wrong 0878
+label and is removed.
+
+Thinking mode answers identically at ~5x the tokens; two of twelve runs never
+finished inside 600 tokens. Checkpoint deleted.
+
+### The prompt-only alternative
+
+One sentence naming both sides ("seen from behind her bare back faces the camera,
+seen from the front her bare chest faces the camera"), no label at all:
+
+| stem | truth | neutral prompt |
+|---|---|---|
+| 0479 | back | back |
+| 0313 | back | back |
+| 0878 | back | back |
+| 0958 | back | **front** |
+| 0002 | front | front |
+| 0942 | front | front |
+
+So the prompt fixes what the gate misses (0313) and fails what the gate gets
+(0958). Neither is complete; the gate is shipped because a false "back" is the
+unrecoverable direction and it has none, with `--assume-back` for the rest.
+
+### Expanded back-view sample (27 images, 8 backs)
+
+Four more backs and one mixed pose were added by the operator: 0228, 0450, 0584,
+0941 (backs) and 0390 (upper body back/side, hips front). `from_behind`:
+
+| stem | from_behind | 4B | truth |
+|---|---|---|---|
+| 0228 | 0.597 | back | back |
+| 0313 | 0.488 | chest | back |
+| 0941 | 0.462 | chest | back |
+| 0584 | 0.436 | back | back |
+| 0450 | 0.374 | chest | back |
+| 0878 | 0.263 | back | back |
+| 0479 | 0.083 | back | back |
+| 0958 | 0.019 | back | back |
+| 0390 | 0.011 | front | mixed |
+| other 18 fronts | <= 0.003 | chest | front |
+
+Tagger 8/8, no false backs. 4B 5/8 (the three misses are all 3/4 backs with the
+chest partly visible -- the question "chest or back" has the wrong shape for
+them). Gate simplified to the tagger alone; `--vlm` still records the answer.
+
+All five new images measure `bust` 0.05 (lowest class) because no chest is
+visible -- without the gate they would also take the flat-chest LoRA and
+"pettanko, tiny breasts, flat chest", pushing them further toward a front.
+
+
+### Bust wording on back views: describe what was measured
+
+A back view hides the chest, so the detector reports the lowest class: all five
+new backs measure 0.05, and six of the eight backs sit at 0.05-0.30.
+
+One round tried dropping the chest clause on backs below bust 0.5, so the prompt
+would stop asserting "androgynous flat chest, smooth flat chest plane, no
+underbust crease". The operator's rule is the opposite: keep describing what was
+measured, including flat/small -- only the assertive low-bust branch (LoRA plus
+"pettanko, tiny breasts, flat chest") stays off on backs.
+
+| back view | bust | chest clause |
+|---|---|---|
+| 0228, 0584, 0958 | 0.05 | kept |
+| 0313, 0390, 0479 | 0.22 | kept |
+| 0450 | 0.30 | kept (medium) |
+| 0941 | 0.52 | kept |
+| 0878 | 0.72 | kept |
+
+A/B on 0228, same seed: without the clause the spine and ribcage contour get
+drawn; with it the back is a smooth flat plane. Final rule keeps the clause.
+`BACK_BUST_MIN` (default 0.0 = never drop) keeps the subtractive path available.

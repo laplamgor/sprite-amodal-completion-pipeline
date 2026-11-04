@@ -1,4 +1,4 @@
-"""Process every image in a folder using the same nodes as the UI workflow.
+﻿"""Process every image in a folder using the same nodes as the UI workflow.
 
 One ComfyUI prompt per chunk, so the 20B model and the text encoder load once per
 chunk. Output keeps the source name: <stem>_amodal.png in output/.
@@ -9,6 +9,7 @@ chunk. Output keeps the source name: <stem>_amodal.png in output/.
 import os
 import sys
 import glob
+import json
 import time
 import argparse
 
@@ -40,6 +41,28 @@ STEPS = 4          # v19 is trained as a 4-step model; 6 only for A/B comparison
 PARSE = False
 HAIR_PROTECT = False
 FOOTWEAR_PROTECT = True
+# EQUIPMENT_PROTECT subtracts props from the clothing mask. Without it the mask
+# swallows whatever the character carries or wears on her back, and the model
+# paints skin over it: 0313 -- a shipgirl with a rig on her back -- lost the rig,
+# the gun in her left hand and the whole arm, leaving a white smear. Footwear
+# protection is the same idea at the other end of the body, and this is the
+# "preserve props" rule the pipeline already promises.
+EQUIPMENT_PROTECT = True
+# Word choice is measurement, not taste (per-word SAM3 mask area, % of canvas):
+#
+#   word       0002   0313   0958
+#   armor      4.0    7.3    8.3   <-- 8.3 is 0958's haori: the coat stayed on
+#   mecha     30.1    8.8    1.5   <-- 30.1 is 0002's whole figure: nothing removed
+#   bag        5.0    7.2    1.7
+#   backpack   1.0    8.3    1.5
+#   machinery  4.8    1.5    2.0
+#   equipment  0.3    1.5    2.0
+#   gun        1.0    1.5    0.2
+#
+# A protection mask is subtracted, so a word that fires on the whole figure
+# silently disables clothing removal (0002) and a word that fires on a garment
+# keeps that garment (0958). armour and mecha are out for exactly those reasons.
+EQUIPMENT = "weapon, gun, sword, shield, backpack, bag, machinery, equipment"
 PROTECT_THRESHOLD = 0.25
 
 PROMPT = ("Remove all of her clothing. She is completely nude, bare torso, "
@@ -64,6 +87,63 @@ LOW_LORA = "Eva_Flat_Chest.safetensors"
 LOW_LORA_STRENGTH = 1.0
 LOW_LORA_TRIGGER = " Eva_Flat_Chest"
 LOW_LORA_BELOW = 0.26
+
+# Back-facing sources need a different branch: the front prompt asserts a chest
+# the source does not show, and the low-bust tags assert one more loudly.  On
+# 0479 -- torso away from the camera, head turned over the shoulder, long sleeves
+# -- the front prompt rebuilt a front torso and swapped both arms at denoise 1.0.
+#
+# BACK_PROMPT keeps every "same ..." assertion and swaps only the anatomy the
+# model is asked to invent: a bare back instead of a bare torso/breasts, plus an
+# explicit "seen from behind" so the arms are rebuilt in the pose they are in.
+#
+# Routing is an explicit stem list (`--assume-back`), not a classifier.  Both
+# instruments that were measured guess "back" for 0313, a front-facing shipgirl
+# with a rack on her back and a sailor top over a small chest: WD tags give
+# from_behind 0.49 / breasts 0.01, and Qwen2.5-VL-3B answers "We see her back."
+# A false "back" repaints a front source backwards, which is worse than missing
+# the one true back view in 22 images, so the label stays a human decision.
+BACK_PROMPT = ("Remove all of her clothing. She is completely nude. Seen from behind: "
+               "bare back, bare shoulders, bare arms, bare legs, bare feet, bare hands. "
+               "Her torso is facing away from the camera, we see her back, not her chest. "
+               "Keep the exact same character, same face, "
+               "same hairstyle, same hair colour, same pose, same arm positions, same body shape, "
+               "same camera angle. Anime illustration, same art style, flat plain solid colour background.")
+
+
+def is_back(stem, views, assume=()):
+    """True when the stem is on the explicit list or the consensus gate says back.
+
+    `assume` entries match as substrings, like --only, so `--assume-back 0479`
+    works without typing the whole stem.  The gate needs both the tagger and the
+    VLM to agree (view_axis.py); a stem listed here always wins.
+    """
+    if any(a.lower() in stem.lower() for a in assume):
+        return True
+    return views.get(stem, {}).get("view") == "back"
+
+
+VIEWS = os.path.join(C.AXES, "_views.json")
+
+# On a back view the chest clause is normally kept and describes what the
+# detector measured, including "flat" / "small" for the bottoms of the scale:
+# the operator's rule is that a barely-seen bust should read flat or small, not
+# be described by nothing. `BACK_BUST_MIN` is the opt-in exception -- set it to
+# e.g. 0.5 to drop the clause on backs below that value instead (it was shipped
+# at 0.5 for one round; 0878 0.72 and 0941 0.52 kept their wording then too).
+# The low-bust *tags and LoRA* stay off for every back view either way, because
+# those assert a chest ("pettanko, tiny breasts") rather than describe one.
+BACK_BUST_MIN = 0.0
+
+
+def load_views():
+    if not os.path.exists(VIEWS):
+        return {}
+    try:
+        with open(VIEWS, encoding="utf-8") as fh:
+            return json.load(fh)
+    except ValueError:
+        return {}
 
 
 def discover(folder):
@@ -91,8 +171,10 @@ GARMENTS = ("shirt, top, collar, polo, dress, skirt, bra, hood, cloak, cape, rob
 def branch(nid, rel, stem, seed, steps, garments=None, sampler="euler", scheduler="beta",
            tag="", legacy=False, dump_mask=False, grow=16, parse=True,
            protect_threshold=0.25, hair_protect=True, footwear_protect=True,
+           equipment_protect=True,
            denoise=1.0, prompt_extra="", max_mp=1.5, sam_refine=2,
-           lora=None, lora_strength=1.0, probe_merge=False, inplace_patch=False):
+           lora=None, lora_strength=1.0, probe_merge=False, inplace_patch=False,
+           base_prompt=None):
     """One image branch; returns (nodes, save_node_id).
 
     The clothing mask is protected: face / hair / hand masks are detected and
@@ -145,10 +227,10 @@ def branch(nid, rel, stem, seed, steps, garments=None, sampler="euler", schedule
             "destination": [str(nid + 28), 0], "source": [str(nid + 13), 0],
             "x": 0, "y": 0, "operation": "subtract"}},
         str(nid + 16): ({"class_type": "TextEncodeQwenImageEditPlus", "inputs": {
-            "clip": ["904", 0], "prompt": PROMPT + prompt_extra, "vae": ["902", 0],
+            "clip": ["904", 0], "prompt": (base_prompt or PROMPT) + prompt_extra, "vae": ["902", 0],
             "image1": [str(nid + 1), 0]}} if legacy else
             {"class_type": "AmodalTextEncode", "inputs": {
-            "clip": ["904", 0], "prompt": PROMPT + prompt_extra, "vae": ["902", 0],
+            "clip": ["904", 0], "prompt": (base_prompt or PROMPT) + prompt_extra, "vae": ["902", 0],
             "image1": [str(nid + 1), 0], "latent": [str(nid + 17), 0]}}),
         str(nid + 17): {"class_type": "VAEEncode", "inputs": {"pixels": [str(nid + 1), 0], "vae": ["902", 0]}},
         str(nid + 18): {"class_type": "SetLatentNoiseMask", "inputs": {
@@ -201,6 +283,18 @@ def branch(nid, rel, stem, seed, steps, garments=None, sampler="euler", schedule
             "threshold": protect_threshold, "refine_iterations": sam_refine,
             "individual_masks": False}}
         prot_ids.append(nid + 34)
+    if equipment_protect:
+        # Props are not clothing.  Anything the mask swallows here is painted
+        # over with skin, and a rig or a held weapon usually has no anatomy to
+        # fall back on (0313: white smear plus a missing arm).
+        n[str(nid + 35)] = {"class_type": "CLIPTextEncode",
+                            "inputs": {"text": EQUIPMENT, "clip": ["900", 1]}}
+        n[str(nid + 36)] = {"class_type": "SAM3_Detect", "inputs": {
+            "model": ["900", 0], "image": [str(nid + 1), 0],
+            "conditioning": [str(nid + 35), 0],
+            "threshold": protect_threshold, "refine_iterations": sam_refine,
+            "individual_masks": False}}
+        prot_ids.append(nid + 36)
     ins = {"mask%d" % (i + 1): [str(x), 0] for i, x in enumerate(prot_ids)}
     ins.update({"grow": 4, "min_area": 100})
     n[str(nid + 13)]["inputs"] = ins
@@ -217,6 +311,10 @@ def branch(nid, rel, stem, seed, steps, garments=None, sampler="euler", schedule
             conds.append(nid + 33)
             order["footwear"] = k
             k += 1
+        if equipment_protect:
+            conds.append(nid + 35)
+            order["equipment"] = k
+            k += 1
         if hair_protect:
             conds.append(nid + 8)
             order["hair"] = k
@@ -227,13 +325,15 @@ def branch(nid, rel, stem, seed, steps, garments=None, sampler="euler", schedule
         for i, c in enumerate(conds, 1):
             det["conditioning%d" % i] = [str(c), 0]
         n[str(nid + 4)] = {"class_type": "AmodalDetectMany", "inputs": det}
-        for j in (nid + 5, nid + 10, nid + 11, nid + 12, nid + 34):
+        for j in (nid + 5, nid + 10, nid + 11, nid + 12, nid + 34, nid + 36):
             n.pop(str(j), None)
         n[str(nid + 6)]["inputs"]["mask1"] = [str(nid + 4), order["outfit"]]
         n[str(nid + 6)]["inputs"]["mask2"] = [str(nid + 4), order["garments"]]
         prot = ["face", "hand"]
         if footwear_protect:
             prot.append("footwear")
+        if equipment_protect:
+            prot.append("equipment")
         if hair_protect:
             prot.append("hair")
         n[str(nid + 13)]["inputs"] = {"mask%d" % (i + 1): [str(nid + 4), order[p]]
@@ -365,10 +465,29 @@ def main():
                          "it swallows sleeves that sit under long hair)")
     ap.add_argument("--no-footwear-protect", action="store_true",
                     help="stop protecting shoes/boots from the clothing mask")
+    ap.add_argument("--no-equipment-protect", action="store_true",
+                    help="stop protecting weapons, bags and worn gear from the clothing "
+                         "mask (they come out painted over, see 0313)")
     ap.add_argument("--denoise", type=float, default=1.0,
                     help="sampler denoise inside the clothing mask (1.0 = repaint fully)")
+    ap.add_argument("--view-gate", action="store_true",
+                    help="route sources that output/axes/_views.json calls 'back' "
+                         "(tagger AND Qwen3-VL-4B agreement, see view_axis.py) down "
+                         "the back branch")
+    ap.add_argument("--assume-back", nargs="*", default=None,
+                    help="stems to render with the back branch regardless of the gate "
+                         "(substring match), e.g. 3/4 backs the tagger reads as front")
+    ap.add_argument("--back-denoise", type=float, default=1.0,
+                    help="denoise for back views; at 4 steps anything above 0.80 is a "
+                         "no-op and 0.80 keeps sleeve shading (ADR-0008), A/B only")
+    ap.add_argument("--no-back-prompt", action="store_true",
+                    help="back views: keep the front prompt (A/B)")
+    ap.add_argument("--no-back-low", action="store_true",
+                    help="back views: keep the low-bust tags/LoRA (A/B)")
     ap.add_argument("--prompt-extra", default="",
                     help="extra sentence appended to the body prompt (trial only)")
+    ap.add_argument("--prompt-base", default=None,
+                    help="replace the base prompt for every image (A/B only)")
     ap.add_argument("--no-profile", action="store_true",
                     help="do not append the per-character body profile to the prompt")
     ap.add_argument("--axes", action="store_true",
@@ -417,7 +536,8 @@ def main():
             "                  \"--port\",\"8199\",\"--listen\",\"127.0.0.1\","
             "\"--use-ck-attention\",\n"
             "                  \"--input-directory\",\"$PWD\\input\","
-            "\"--output-directory\",\"$PWD\\output\" `\n"
+            "\"--output-directory\",\"$PWD\\output\",\n"
+            "                  \"--extra-model-paths-config\",\"$PWD\\comfy_nodes.yaml\" `\n"
             "    -RedirectStandardOutput \"..\\server.log\" "
             "-RedirectStandardError \"..\\server.err.log\"\n\n"
             "Check with:\n"
@@ -450,21 +570,30 @@ def main():
         return
 
     t0 = time.time()
+    assume = a.assume_back or ()
+    views = load_views() if a.view_gate else {}
+    back_stems = [stem for _, stem in todo if is_back(stem, views, assume)]
+    if back_stems:
+        print("back branch: %d image(s)" % len(back_stems))
+        for s in back_stems:
+            how = ("listed" if any(x.lower() in s.lower() for x in assume)
+                   else views.get(s, {}).get("answer") or "gate")
+            print("    %-40s %s" % (s, how))
     low = []
     if a.axes and not a.no_low_lora and a.lora is None:
-        import json as _json
+        back_set = set(back_stems)
         for rel, stem in todo:
             p = os.path.join(C.AXES, stem + ".json")
             if not os.path.exists(p):
                 continue
             with open(p, encoding="utf-8") as fh:
-                b = _json.load(fh).get("bust_measured")
-            if b is not None and b < LOW_LORA_BELOW:
+                b = json.load(fh).get("bust_measured")
+            if b is not None and b < LOW_LORA_BELOW and stem not in back_set:
                 low.append(stem)
     if low:
         try:
             import urllib.request as _u
-            info = _json.loads(_u.urlopen(
+            info = json.loads(_u.urlopen(
                 t.HOST + "/object_info/LoraLoaderModelOnly", timeout=30).read())
             have = info["LoraLoaderModelOnly"]["input"]["required"]["lora_name"][0]
         except Exception as e:
@@ -503,6 +632,19 @@ def main():
         for rel, stem in chunk:
             extra = a.prompt_extra
             lora, lora_strength = a.lora, a.lora_strength
+            back = is_back(stem, views, assume)
+            base = a.prompt_base or PROMPT
+            denoise = a.denoise
+            if back and not a.prompt_base:
+                if not a.no_back_prompt:
+                    base = BACK_PROMPT
+                if a.back_denoise != 1.0:
+                    denoise = a.back_denoise
+                print("    back branch: %s%s%s"
+                      % ("front prompt kept" if a.no_back_prompt else "back prompt",
+                         ", low-bust tags kept" if a.no_back_low else ", no low-bust",
+                         "" if a.back_denoise == 1.0 else
+                         ", denoise %.2f" % a.back_denoise))
             if not a.no_profile:
                 try:
                     import image_profile
@@ -511,15 +653,21 @@ def main():
                 except Exception as e:
                     print("    profile skipped:", e)
             if a.axes:
-                import json as _json
                 apath = os.path.join(C.AXES, stem + ".json")
                 if os.path.exists(apath):
-                    with open(apath, encoding="utf-8") as _fh:
-                        rec = _json.load(_fh)
+                    with open(apath, encoding="utf-8") as fh:
+                        rec = json.load(fh)
                     frag = rec.get("parts_cal") or rec.get("parts") or []
                     style = rec.get("style") or []
                     bust = rec.get("bust_measured")
-                    if bust is not None and bust < LOW_BUST_BELOW:
+                    if back and (bust is None or bust < BACK_BUST_MIN):
+                        # Only when the operator opts in via BACK_BUST_MIN, or when
+                        # there is no measurement at all: then there is nothing to
+                        # describe.
+                        chest = set(rec.get("chest") or [])
+                        frag = [p for p in frag if p not in chest]
+                    low_ok = not (back and not a.no_back_low)
+                    if bust is not None and bust < LOW_BUST_BELOW and low_ok:
                         if not a.no_low_lora and lora is None:
                             lora = LOW_LORA
                             lora_strength = LOW_LORA_STRENGTH
@@ -532,9 +680,10 @@ def main():
             nodes, save_id = branch(nid, rel, stem, a.seed, a.steps, a.garments,
                                     sampler, scheduler, a.tag, a.legacy, a.dump_mask,
                                     a.grow, a.parse, a.protect_threshold, a.hair_protect,
-                                    not a.no_footwear_protect, a.denoise, extra,
+                                    not a.no_footwear_protect,
+                                    not a.no_equipment_protect, denoise, extra,
                                     a.max_mp, a.sam_refine, lora, lora_strength,
-                                    not a.no_probe_merge, not a.no_inplace_patch)
+                                    not a.no_probe_merge, not a.no_inplace_patch, base)
             wf.update(nodes)
             saves[stem] = save_id
             nid += 100

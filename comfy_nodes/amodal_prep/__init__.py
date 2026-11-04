@@ -92,14 +92,21 @@ class MaskUnionFill:
             "mask2": ("MASK",),
             "mask3": ("MASK",),
             "mask4": ("MASK",),
+            "mask5": ("MASK",),
+            "mask6": ("MASK",),
+            "mask7": ("MASK",),
+            "mask8": ("MASK",),
         }}
 
     RETURN_TYPES = ("MASK",)
     FUNCTION = "run"
     CATEGORY = "image/amodal"
 
-    def run(self, mask1, grow, min_area, mask2=None, mask3=None, mask4=None):
-        ms = [m[0].cpu().numpy() > 0.5 for m in (mask1, mask2, mask3, mask4) if m is not None]
+    def run(self, mask1, grow, min_area, mask2=None, mask3=None, mask4=None,
+            mask5=None, mask6=None, mask7=None, mask8=None):
+        ms = [m[0].cpu().numpy() > 0.5 for m in
+              (mask1, mask2, mask3, mask4, mask5, mask6, mask7, mask8)
+              if m is not None]
         union = np.logical_or.reduce(ms)
 
         lab, n = label(union)
@@ -652,25 +659,28 @@ class DetectAmodal:
                 "refine_iterations": ("INT", {"default": 2, "min": 0, "max": 5}),
                 "clothing_prompts": ("INT", {"default": 2, "min": 0, "max": 6}),
             },
-            "optional": {"conditioning%d" % i: ("CONDITIONING",) for i in range(2, 7)},
+            "optional": {"conditioning%d" % i: ("CONDITIONING",) for i in range(2, 9)},
         }
 
-    RETURN_TYPES = ("MASK",) * 6
-    RETURN_NAMES = ("mask1", "mask2", "mask3", "mask4", "mask5", "mask6")
+    RETURN_TYPES = ("MASK",) * 8
+    RETURN_NAMES = ("mask1", "mask2", "mask3", "mask4", "mask5", "mask6",
+                    "mask7", "mask8")
     FUNCTION = "run"
     CATEGORY = "amodal_prep"
 
     def run(self, model, image, conditioning1, threshold=0.30,
             protect_threshold=0.25, refine_iterations=2, clothing_prompts=2,
             conditioning2=None, conditioning3=None,
-            conditioning4=None, conditioning5=None, conditioning6=None):
+            conditioning4=None, conditioning5=None, conditioning6=None,
+            conditioning7=None, conditioning8=None):
         import torch.nn.functional as F
         import comfy.model_management
         import comfy.utils
         from comfy_extras.nodes_sam3 import _extract_text_prompts
 
         conds = [c for c in (conditioning1, conditioning2, conditioning3,
-                             conditioning4, conditioning5, conditioning6) if c]
+                             conditioning4, conditioning5, conditioning6,
+                             conditioning7, conditioning8) if c]
 
         B, H, W, C = image.shape
         image_in = comfy.utils.common_upscale(
@@ -767,7 +777,7 @@ class DetectAmodal:
 
         z = torch.zeros(H, W)
         result = []
-        for ci in range(6):
+        for ci in range(8):
             result.append(torch.stack(out[ci]) if ci < len(out) else z[None])
         return tuple(result)
 

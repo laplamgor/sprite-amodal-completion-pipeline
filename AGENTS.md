@@ -1,4 +1,4 @@
-# Project instructions — sprite-amodal-completion-pipeline
+﻿# Project instructions — sprite-amodal-completion-pipeline
 
 A batch pipeline that repaints garment regions of transparent-background anime
 PNGs as bare skin, preserving pose, identity, hair, accessories and props.
@@ -91,12 +91,22 @@ any other way makes every render fail to find its source.
 ..\python_embeded\python.exe depth_prepass.py
 ..\python_embeded\python.exe vlm_axes.py
 ..\python_embeded\python.exe bust_measure.py
+..\python_embeded\python.exe view_axis.py
 ..\python_embeded\python.exe rederive.py --refit
 
 # render, then verify
-..\python_embeded\python.exe run_folder.py --axes --no-profile --chunk 7 --force
+..\python_embeded\python.exe run_folder.py --view-gate --axes --no-profile --chunk 7 --force
 ..\python_embeded\python.exe evaluate.py --no-sheets
 ```
+
+- `--view-gate` sends back-facing sources down a separate branch (no low-bust
+  tags, back prompt). The label comes from the WD tagger alone
+  (`from_behind >= 0.01`): 8 of 8 backs, no false backs in the 27-image corpus.
+  The VLMs are recorded with `--vlm` but not consulted — they read the 3/4 backs
+  as chests because the chest is partly visible. On a back view the chest clause
+  still describes the measured size — "flat"/"small" included — because a
+  barely-seen bust should be described, not dropped; only the assertive low-bust
+  tags/LoRA stay off. `--assume-back` overrides the gate.
 
 - `rederive.py --refit` is required whenever the corpus changes: `build` is ranked
   across the corpus, so adding images moves every cut.
