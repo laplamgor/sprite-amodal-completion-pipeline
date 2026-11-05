@@ -60,7 +60,7 @@ ComfyUI_windows_portable_v043/
 | segmentation | `sam3.1_multiplex_fp16.safetensors` |
 | matting | `birefnet.safetensors` |
 | depth | `depth_anything_3_base.safetensors` (in `models/geometry_estimation/`) |
-| flat-chest LoRA | `Eva_Flat_Chest.safetensors` (in `models/loras/`) — auto-applied below 0.26 bust |
+| flat-chest LoRA | `Eva_Flat_Chest.safetensors` (in `models/loras/`) — auto-applied below 0.50 bust, back views included |
 | chest detector | `models/breast_size_y11m.pt` (in this repo) |
 | booru tagger | `models/wd-swinv2-tagger-v3.onnx` (in this repo, for `view_axis.py`) |
 | view gate VLM | `Qwen/Qwen3-VL-4B-Instruct` (HF cache, ~8.6 GB, only loaded when the tagger flags an image) |
@@ -155,9 +155,11 @@ redrawn older, taller or in a different outfit gets its own parameters.
 | `--force` | off | re-render even if `_amodal.png` exists |
 | `--only` | — | substring filter on filenames |
 | `--axes` | off | append `parts_cal` + `style` from `output/axes` |
-| `--view-gate` | off | back views (tagger) get the back branch; the chest clause still describes the measured size, the low-bust tags/LoRA do not |
+| `--view-gate` | off | back views (tagger) get the back branch; the chest clause still describes the measured size, the low-bust tags stay off and the LoRA still applies |
 | `--assume-back` | — | stems to force onto the back branch (substring match) |
 | `--back-denoise` | 1.0 | denoise for back views; no-op above 0.80 at 4 steps (ADR-0008), A/B only |
+| `--no-back-low` | off | back views: skip the low-bust LoRA and tags entirely (A/B) |
+| `--back-low-tags` | off | back views: also append the pettanko tags below 0.26 (asserts a front chest) |
 | `--no-profile` | off | skip the `image_profile` sentence |
 | `--max-mp` | 1.5 | canvas megapixel cap (`1.0` ≈ 33 % faster) |
 | `--sam-refine` | 2 | SAM3 refinement iterations per probe |
@@ -166,7 +168,7 @@ redrawn older, taller or in a different outfit gets its own parameters.
 | `--parse` | off | add the segformer clothing mask |
 | `--hair-protect` | off | subtract the SAM3 hair mask |
 | `--no-footwear-protect` | off | stop protecting shoes/boots |
-| `--no-equipment-protect` | off | stop protecting weapons, bags and worn gear |
+| `--no-equipment-protect` | off | stop protecting weapons, bags and worn gear; the equipment mask is dropped above 15% of the canvas (ADR-0012) |
 | `--denoise` | 1.0 | sampler denoise inside the clothing mask |
 | `--grow` | 16 | mask dilation, px |
 | `--protect-threshold` | — | SAM3 score threshold for protected regions |
@@ -177,7 +179,7 @@ redrawn older, taller or in a different outfit gets its own parameters.
 | `--dump-mask` | off | save the final mask |
 | `--lora` | — | patch a LoRA onto the unet, for every image |
 | `--lora-strength` | 1.0 | strength for `--lora` |
-| `--no-low-lora` | off | skip the automatic flat-chest LoRA below 0.26 bust |
+| `--no-low-lora` | off | skip the automatic flat-chest LoRA below 0.50 bust |
 | `--no-probe-merge` | off | five separate SAM3 detector nodes, for A/B (ADR-0012) |
 | `--no-stage-order` | off | schedule image-by-image instead of stage-by-stage (ADR-0013) |
 | `--no-inplace-patch` | off | clone the model for the ControlNet patch, stock node (ADR-0014) |
@@ -435,8 +437,9 @@ file, so the working directory is not on `sys.path`. Run the scripts by path
   words buy 0.75 of the 1.9 prior and nothing beyond that — do not try to prompt
   the rest away.
 - **A flat-chest LoRA does the rest, partially.** `Eva_Flat_Chest` (trained on
-  Qwen-Image, not Edit, so cross-base) at strength 1.0, applied only below
-  0.26 bust: mean bias **+1.31 -> +0.52** over 20 images, 15 improved, 5
+  Qwen-Image, not Edit, so cross-base) at strength 1.0, applied below 0.26 bust
+  at the time of this measurement (the gate has since moved to 0.50; ADR-0008):
+  mean bias **+1.31 -> +0.52** over 20 images, 15 improved, 5
   unchanged, none worse. Strength 0.7 does nothing — the dose response is a
   cliff. Cost is ~0 (74.3 vs 73.5 s/image at chunk 6-7). The trigger word must
   come *before* the other chest phrases: after them, 0381 renders 0.91 instead

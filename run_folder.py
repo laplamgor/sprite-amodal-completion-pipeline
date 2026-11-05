@@ -65,6 +65,26 @@ EQUIPMENT_PROTECT = True
 EQUIPMENT = "weapon, gun, sword, shield, backpack, bag, machinery, equipment"
 PROTECT_THRESHOLD = 0.25
 
+# A protection mask is SUBTRACTED, so a word that fires on a garment turns the
+# inpaint off for that garment -- and SAM3's prop words do fire on big pale
+# clothing.  Measured per word, % of canvas, on the three images that came out
+# fully dressed:
+#
+#   word        0722 (wedding dress)  0547 (white cloak)  0932 (latex suit)  worst real prop
+#   weapon            26.3                  0.2                0.1               1.5
+#   gun               32.8                  0.6                0.1               1.5
+#   shield            25.4                  0.3               17.1               0.2
+#   backpack          22.6                 23.4                9.4               8.3
+#   bag                3.5                 22.5                1.3               7.2
+#   machinery         33.8                 27.2               20.8               2.0
+#   equipment          1.3                  0.7               22.6               2.0
+#
+# A real prop in this corpus tops out at 8.3% (0313's rig), so the cap sits at
+# 15%: every mask above it is the garment being mistaken for a weapon. The cap
+# is per mask, inside AmodalMaskUnionFill, so dropping one word never drops the
+# others.
+PROTECT_MAX_AREA = 15.0
+
 PROMPT = ("Remove all of her clothing. She is completely nude, bare torso, "
           "bare arms, bare legs, bare feet, bare hands. Keep the exact same character, same face, "
           "same hairstyle, same hair colour, same pose, same arm positions, same body shape, "
@@ -77,16 +97,34 @@ PROMPT = ("Remove all of her clothing. She is completely nude, bare torso, "
 LOW_BUST_BELOW = 0.26
 LOW_BUST_TAGS = " pettanko, tiny breasts, flat chest."
 
-# LoRA for the two lowest bands.  Eva_Flat_Chest is trained on Qwen-Image, not
-# Edit, but it still works on this merge: at strength 1.0 it pulled 0381 from
-# class 1.00 to 0.30 and 0201 from 1.22 to 0.77, with face/hair/props intact.
-# At 0.7 it did nothing -- the dose response is a cliff, not a slope.  Gated
-# because it is a global LoRA and would also shrink the large ones.
+# LoRA for the low bands.  Eva_Flat_Chest is trained on Qwen-Image, not Edit,
+# but it still works on this merge: at strength 1.0 it pulled 0381 from class
+# 1.00 to 0.30 and 0201 from 1.22 to 0.77, with face/hair/props intact.  At 0.7
+# it did nothing -- the dose response is a cliff, not a slope.
+#
+# Its gate is WIDER than the tag gate: 0.50, the detector's "average", because
+# the default render inflates everything below that.  Measured source -> render,
+# detector classes, same seed:
+#
+#   image   source   default   with LoRA
+#   0578    0.35     0.52      0.38
+#   0528    0.31     0.47      0.28
+#   0687    0.38     0.38*     0.26      (*but cropped by the mask edge)
+#   0902    0.47     0.66      0.41
+#   0497    0.47     0.55      0.27
+#   0450    0.30     0.42      0.22
+#
+# Above it the LoRA is not needed: 0878 (0.72) already renders at 0.63.  The
+# crop the operator reported is the same fault seen from the other side -- the
+# model paints a chest wider than the clothing mask, the part over the arm is
+# discarded, and the breast ends in a straight edge.  A smaller painted bust
+# fits inside the mask.
+#
 # Cost: +3.3 s/image (~6.5%) for the one-time patch of the 9.4 GB unet.
 LOW_LORA = "Eva_Flat_Chest.safetensors"
 LOW_LORA_STRENGTH = 1.0
 LOW_LORA_TRIGGER = " Eva_Flat_Chest"
-LOW_LORA_BELOW = 0.26
+LOW_LORA_BELOW = 0.50
 
 # Back-facing sources need a different branch: the front prompt asserts a chest
 # the source does not show, and the low-bust tags assert one more loudly.  On
@@ -131,8 +169,17 @@ VIEWS = os.path.join(C.AXES, "_views.json")
 # be described by nothing. `BACK_BUST_MIN` is the opt-in exception -- set it to
 # e.g. 0.5 to drop the clause on backs below that value instead (it was shipped
 # at 0.5 for one round; 0878 0.72 and 0941 0.52 kept their wording then too).
-# The low-bust *tags and LoRA* stay off for every back view either way, because
-# those assert a chest ("pettanko, tiny breasts") rather than describe one.
+#
+# The *LoRA* now runs on backs too. It is a shape prior, not a chest assertion:
+# on 0313 and 0479 (both 0.22, both backs) the back branch painted a side-boob
+# that the source does not have. The detector cannot rank a back -- it read 0.05
+# on both renders before the LoRA, then 0.05 / 0.38 after -- so the source
+# measurement is the signal and the A/B is visual: 0479's side-boob is gone and
+# 0313 is unchanged to the eye. 0450 is the one back it can measure: 0.42 ->
+# 0.26 against a 0.30 source. `--no-back-low` skips the LoRA and tags on backs.
+#
+# The *tags* stay off on backs: "pettanko, tiny breasts, flat chest" asserts a
+# front chest, which is the original 0479 bug. `--back-low-tags` opts in.
 BACK_BUST_MIN = 0.0
 
 
@@ -294,7 +341,13 @@ def branch(nid, rel, stem, seed, steps, garments=None, sampler="euler", schedule
             "conditioning": [str(nid + 35), 0],
             "threshold": protect_threshold, "refine_iterations": sam_refine,
             "individual_masks": False}}
-        prot_ids.append(nid + 36)
+        # The cap is on the equipment mask alone, never on the union: face and
+        # hair are also protections, and a character with very long hair can
+        # exceed 15% -- dropping that would paint over her hair.
+        n[str(nid + 37)] = {"class_type": "AmodalMaskUnionFill", "inputs": {
+            "mask1": [str(nid + 36), 0], "grow": 0, "min_area": 100,
+            "max_area": PROTECT_MAX_AREA}}
+        prot_ids.append(nid + 37)
     ins = {"mask%d" % (i + 1): [str(x), 0] for i, x in enumerate(prot_ids)}
     ins.update({"grow": 4, "min_area": 100})
     n[str(nid + 13)]["inputs"] = ins
@@ -332,13 +385,17 @@ def branch(nid, rel, stem, seed, steps, garments=None, sampler="euler", schedule
         prot = ["face", "hand"]
         if footwear_protect:
             prot.append("footwear")
-        if equipment_protect:
-            prot.append("equipment")
         if hair_protect:
             prot.append("hair")
-        n[str(nid + 13)]["inputs"] = {"mask%d" % (i + 1): [str(nid + 4), order[p]]
-                                      for i, p in enumerate(prot)}
-        n[str(nid + 13)]["inputs"].update({"grow": 4, "min_area": 100})
+        ins = {"mask%d" % (i + 1): [str(nid + 4), order[p]]
+               for i, p in enumerate(prot)}
+        if equipment_protect:
+            n[str(nid + 37)] = {"class_type": "AmodalMaskUnionFill", "inputs": {
+                "mask1": [str(nid + 4), order["equipment"]], "grow": 0,
+                "min_area": 100, "max_area": PROTECT_MAX_AREA}}
+            ins["mask%d" % (len(ins) + 1)] = [str(nid + 37), 0]
+        ins.update({"grow": 4, "min_area": 100})
+        n[str(nid + 13)]["inputs"] = ins
     if not parse:
         n[str(nid + 14)]["inputs"]["destination"] = [str(nid + 6), 0]
         n.pop(str(nid + 27), None)
@@ -483,7 +540,10 @@ def main():
     ap.add_argument("--no-back-prompt", action="store_true",
                     help="back views: keep the front prompt (A/B)")
     ap.add_argument("--no-back-low", action="store_true",
-                    help="back views: keep the low-bust tags/LoRA (A/B)")
+                    help="back views: skip the low-bust LoRA/tags entirely (A/B)")
+    ap.add_argument("--back-low-tags", action="store_true",
+                    help="back views: also append the pettanko tags below the "
+                         "low-bust threshold (asserts a front chest)")
     ap.add_argument("--prompt-extra", default="",
                     help="extra sentence appended to the body prompt (trial only)")
     ap.add_argument("--prompt-base", default=None,
@@ -581,14 +641,18 @@ def main():
             print("    %-40s %s" % (s, how))
     low = []
     if a.axes and not a.no_low_lora and a.lora is None:
-        back_set = set(back_stems)
         for rel, stem in todo:
             p = os.path.join(C.AXES, stem + ".json")
             if not os.path.exists(p):
                 continue
             with open(p, encoding="utf-8") as fh:
                 b = json.load(fh).get("bust_measured")
-            if b is not None and b < LOW_LORA_BELOW and stem not in back_set:
+            # Backs take the LoRA too now; only --no-back-low skips them.  This
+            # must mirror the per-image gate below, or the count and the LoRA
+            # grouping disagree with what actually renders.
+            if a.no_back_low and is_back(stem, views, assume):
+                continue
+            if b is not None and b < LOW_LORA_BELOW:
                 low.append(stem)
     if low:
         try:
@@ -642,7 +706,9 @@ def main():
                     denoise = a.back_denoise
                 print("    back branch: %s%s%s"
                       % ("front prompt kept" if a.no_back_prompt else "back prompt",
-                         ", low-bust tags kept" if a.no_back_low else ", no low-bust",
+                         (", low-bust LoRA+tags skipped" if a.no_back_low else
+                          ", low-bust tags kept" if a.back_low_tags else
+                          ", no low-bust tags"),
                          "" if a.back_denoise == 1.0 else
                          ", denoise %.2f" % a.back_denoise))
             if not a.no_profile:
@@ -666,13 +732,17 @@ def main():
                         # describe.
                         chest = set(rec.get("chest") or [])
                         frag = [p for p in frag if p not in chest]
-                    low_ok = not (back and not a.no_back_low)
-                    if bust is not None and bust < LOW_BUST_BELOW and low_ok:
-                        if not a.no_low_lora and lora is None:
+                    low_ok = not (back and a.no_back_low)
+                    if bust is not None and low_ok:
+                        # LoRA gate is wider than the tag gate: a shape prior
+                        # below "average", an assertion only below "small".
+                        if (bust < LOW_LORA_BELOW and not a.no_low_lora
+                                and lora is None):
                             lora = LOW_LORA
                             lora_strength = LOW_LORA_STRENGTH
                             extra = extra + LOW_LORA_TRIGGER   # trigger first
-                        extra = extra + LOW_BUST_TAGS
+                        if bust < LOW_BUST_BELOW and (not back or a.back_low_tags):
+                            extra = extra + LOW_BUST_TAGS
                     if frag or style:
                         extra = extra + " Her body: " + ", ".join(frag + style) + "."
                 else:

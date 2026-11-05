@@ -106,15 +106,22 @@ any other way makes every render fail to find its source.
   as chests because the chest is partly visible. On a back view the chest clause
   still describes the measured size — "flat"/"small" included — because a
   barely-seen bust should be described, not dropped; only the assertive low-bust
-  tags/LoRA stay off. `--assume-back` overrides the gate.
+  tags stay off (`--back-low-tags` opts in). `--assume-back` overrides the gate.
 
 - `rederive.py --refit` is required whenever the corpus changes: `build` is ranked
   across the corpus, so adding images moves every cut.
-- The flat-chest LoRA is applied automatically below `bust < 0.26`; `--no-low-lora`
-  disables it. The file is required and lives in the model host:
+- The flat-chest LoRA is applied automatically below `bust < 0.50`, back views
+  included; `--no-low-lora` disables it. It is a shape prior, not an assertion:
+  below 0.50 the default render inflates the chest and runs past the clothing
+  mask (measured 0.31 -> 0.47, 0.47 -> 0.66; ADR-0008). Above 0.50 it is not
+  applied. The file is required and lives in the model host:
   `..\..\ComfyUI_windows_portable\ComfyUI\models\loras\Eva_Flat_Chest.safetensors`.
   `run_folder.py` checks the server's LoRA list at startup and warns rather than
   failing if it is absent.
+- A protection mask is *subtracted* from the clothing mask, so a false positive
+  silently disables the inpaint. The equipment mask is dropped entirely when it
+  exceeds 15% of the canvas (`PROTECT_MAX_AREA`, ADR-0012): SAM3's prop words fire
+  on big pale garments (0722's dress: "gun" 32.8%). Real props top out at 8.3%.
 - `--tag` is for A/B renders. Delete tagged outputs when the A/B is over; only
   `<stem>_amodal.png` is a real output.
 

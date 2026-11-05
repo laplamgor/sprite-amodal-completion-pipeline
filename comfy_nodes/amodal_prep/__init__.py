@@ -82,6 +82,17 @@ class SafeFrame:
 
 
 class MaskUnionFill:
+    """Union of up to eight masks, filled, then dilated.
+
+    `max_area` (percent of the image) drops any single input above that size
+    before the union.  It exists for the protection masks: a subtracted
+    protection mask cannot be undone, and SAM3's prop words fire on garments
+    when the garment is large and pale -- on 0722's white dress "gun" covers
+    32.8% of the canvas, "machinery" 33.8%, "weapon" 26.3%, all of them the
+    dress itself.  Real props in the corpus top out at 8.3% (0313's rig), so a
+    15% cap keeps every prop and drops every garment the words mistake for one.
+    """
+
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
@@ -89,6 +100,11 @@ class MaskUnionFill:
             "grow": ("INT", {"default": 16, "min": 0, "max": 256}),
             "min_area": ("INT", {"default": 400, "min": 0, "max": 100000}),
         }, "optional": {
+            # Optional, not required: the clothing union and make_ui_workflow
+            # both build this node without it, and a required widget makes
+            # ComfyUI reject those prompts ("Required input is missing").
+            "max_area": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 100.0,
+                                   "step": 0.5}),
             "mask2": ("MASK",),
             "mask3": ("MASK",),
             "mask4": ("MASK",),
@@ -102,12 +118,22 @@ class MaskUnionFill:
     FUNCTION = "run"
     CATEGORY = "image/amodal"
 
-    def run(self, mask1, grow, min_area, mask2=None, mask3=None, mask4=None,
-            mask5=None, mask6=None, mask7=None, mask8=None):
-        ms = [m[0].cpu().numpy() > 0.5 for m in
-              (mask1, mask2, mask3, mask4, mask5, mask6, mask7, mask8)
-              if m is not None]
-        union = np.logical_or.reduce(ms)
+    def run(self, mask1, grow, min_area, max_area=100.0, mask2=None, mask3=None,
+            mask4=None, mask5=None, mask6=None, mask7=None, mask8=None):
+        ms = []
+        for i, m in enumerate((mask1, mask2, mask3, mask4, mask5, mask6,
+                               mask7, mask8)):
+            if m is None:
+                continue
+            a = m[0].cpu().numpy() > 0.5
+            frac = 100.0 * a.mean()
+            if max_area < 100.0 and frac > max_area:
+                print("[amodal] mask %d dropped: %.1f%% > %.1f%%"
+                      % (i + 1, frac, max_area))
+                continue
+            ms.append(a)
+        union = (np.logical_or.reduce(ms) if ms
+                 else np.zeros(mask1[0].shape, dtype=bool))
 
         lab, n = label(union)
         filled = np.zeros_like(union)

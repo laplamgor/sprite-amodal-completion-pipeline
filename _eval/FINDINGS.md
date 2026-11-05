@@ -516,3 +516,132 @@ measured, including flat/small -- only the assertive low-bust branch (LoRA plus
 A/B on 0228, same seed: without the clause the spine and ribcage contour get
 drawn; with it the back is a smooth flat plane. Final rule keeps the clause.
 `BACK_BUST_MIN` (default 0.0 = never drop) keeps the subtractive path available.
+
+## 13. Garment-sized protection masks, and the LoRA gate at 0.50 (2026-11-05)
+
+Operator report, in priority order: three images were "not nude at all" (0932
+black latex suit, 0547 white hooded cloak, 0722 white wedding dress); four had
+"breast inpainted as too large and then cropped by mask" (0479, 0497, 0528,
+0687); two back views got a side-boob (0313, 0479); and three loose-garment
+images re-posed an arm (0921, 0941, 0958).
+
+### The equipment protection mask was the garment
+
+`--dump-mask` on the three dressed images put the *edited* mask at 2.2 / 4.0 /
+3.8 % of the canvas. The inpaint was running; it had almost nothing to run on.
+
+Per-prompt areas, one prompt per SAM3 pass (`_eval/probe_masks.py`, threshold
+0.25, % of canvas):
+
+| stem | outfit | garments | equipment | edited mask |
+|---|---|---|---|---|
+| 0932 | 2.2 | 12.8 | **22.6** | 2.2 |
+| 0722 | 25.3 | 34.1 | **34.1** | 4.0 |
+| 0547 | 23.9 | 27.1 | **27.9** | 3.8 |
+
+Protection is subtracted from clothing, so the equipment mask alone erased the
+garment. Per word (`_eval/probe_words.py`):
+
+| word | 0722 dress | 0547 cloak | 0932 suit | worst real prop |
+|---|---|---|---|---|
+| weapon | 26.3 | 0.2 | 0.1 | 1.5 |
+| gun | 32.8 | 0.6 | 0.1 | 1.5 |
+| shield | 25.4 | 0.3 | 17.1 | 0.2 |
+| backpack | 22.6 | 23.4 | 9.4 | 8.3 |
+| bag | 3.5 | 22.5 | 1.3 | 7.2 |
+| machinery | 33.8 | 27.2 | 20.8 | 2.0 |
+| equipment | 1.3 | 0.7 | 22.6 | 2.0 |
+
+Two levers were measured and rejected before the cap:
+
+| lever | edited mask (0932 / 0722 / 0547) | verdict |
+|---|---|---|
+| 25-term garment list | 3.2 / 4.0 / 4.0 % | no effect |
+| `--parse` (SegFormer clothes) | 2.4 / 4.1 / 4.1 % | no effect |
+
+`--parse` is worth remembering: the parse mask itself was 10.2 / 32.2 / 28.5 %
+and the final mask did not move, because the same protection union was
+subtracting it. That is what pointed at protection instead of detection.
+
+The shipped fix is the size cap (ADR-0012): a single protection input above
+`PROTECT_MAX_AREA = 15` % is dropped. Final masks 18.2 / 36.9 / 33.2 %, all
+three nude. Controls 0313 (rig, guns, armour, thigh gear) and 0958 (lantern,
+fox mask, ribbons) are visually unchanged.
+
+Trap: `max_area` must be an *optional* input on `AmodalMaskUnionFill`. As a
+required one the server rejected every prompt that did not send it -- the
+clothing union and `make_ui_workflow` -- with `required_input_missing`.
+
+Accepted cost: with the mask now covering the whole dress/cloak, the model
+re-poses the arms inside that large area, and 0722's bouquet is painted away.
+Previously those images were fully dressed, so this is the better failure.
+
+### The LoRA gate moved from 0.26 to 0.50 and now runs on backs
+
+The four "cropped" images are one fault: below average the default render paints
+a chest larger than the source, wider than the clothing mask, and the part over
+the arm is discarded at the mask edge, leaving a straight vertical cut.
+
+| image | source | default | with LoRA |
+|---|---|---|---|
+| 0578 | 0.35 | 0.52 | 0.38 |
+| 0528 | 0.31 | 0.47 | 0.28 |
+| 0687 | 0.38 | 0.38* | 0.26 |
+| 0902 | 0.47 | 0.66 | 0.41 |
+| 0497 | 0.47 | 0.55 | 0.27 |
+| 0450 | 0.30 | 0.42 | 0.22 |
+| 0878 (control, above gate) | 0.72 | 0.63 | -- |
+
+\* 0687's class is unchanged but its default render is the clearest crop: the
+bust's outer edge is a vertical line at the arm; the LoRA version fits inside
+the mask.
+
+On backs the source measurement is the only signal -- the detector reads 0.05 on
+both 0313 and 0479 *renders*, because a back hides the chest. Both sources are
+0.22, both painted a full side-boob; the LoRA removes it. The tags stay at 0.26
+and stay off on backs (`--back-low-tags` opts in): they assert a front chest.
+`--no-back-low` now skips LoRA and tags together.
+
+### Rejected in the same round
+
+| lever | image | result |
+|---|---|---|
+| `--grow 32` | 0528 | painted chest got larger and merged into the arm |
+| `--grow 8` | 0921 | arm/hand rebuilt the same way as the default |
+| `--parse` | the three dressed | final mask unchanged (see above) |
+
+The loose-garment arm/third-arm problem (0921, 0941, 0958) is *not* fixed by
+mask growth in either direction; it is the model re-posing inside a large edit
+area. 0958's low IoU (0.708) is the far hand rebuilt behind the hip and a short
+rear foot, not a mask bug.
+### What the 27-image run actually produced
+
+Whole corpus, `evaluate.py --no-sheets`: mean IoU 0.869, median 0.916, mean
+dAlpha -12.7 % (before this round: 0.916 / 0.956 / -8.0 %). The drop is
+concentrated in the three images that are now nude -- 0547 0.499, 0722 0.498,
+0932 0.725. Removing a dress removes silhouette, so -50 % alpha there is the
+goal, not a regression. Every other image is unchanged or within a few points.
+
+Bust, source -> render over all 27, mean delta +0.023. The four crop cases:
+0497 0.47 -> 0.27, 0528 0.31 -> 0.22, 0687 0.38 -> 0.22, 0450 0.30 -> 0.26.
+Nothing on the front side is flatter than its source by more than one class.
+The two remaining outliers are backs -- 0479 +0.16, 0584 +0.33 -- where the
+detector cannot see the chest; the visual A/B shows a flat back on both.
+
+### Trap: the back gate was inverted
+
+The per-image condition read `not (back and not a.no_back_low)`: backs skip the
+low-bust branch *unless* the flag is passed. The first 27-image run therefore
+applied the LoRA to 15 fronts and to no back at all, and nothing failed loudly.
+Caught by pixel-diffing the `_blo` A/B against the default -- 0 px differ with
+`--no-back-low` absent, which is impossible if the LoRA had run. Fixed to
+`not (back and a.no_back_low)`.
+
+The pre-flight count printed "15 low-bust image(s)" for the same reason: it
+excluded backs from the LoRA estimate even though the gate was meant to include
+them. It now uses the same condition as the per-image gate (22 images below
+0.50, 15 fronts + 7 backs). The grouping/sort used that list too.
+
+Do not use the detector to rank backs: 0479's pre-LoRA render read 0.05 and its
+post-LoRA render 0.38 with no visible chest either time.
+
