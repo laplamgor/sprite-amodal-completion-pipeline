@@ -645,3 +645,300 @@ them. It now uses the same condition as the per-image gate (22 images below
 Do not use the detector to rank backs: 0479's pre-LoRA render read 0.05 and its
 post-LoRA render 0.38 with no visible chest either time.
 
+## 14. Hand/arm guards: VLM fails, a domain detector half-works, keypoints fail
+
+The operator reported spare hands on 0902, 0722, 0941 and a changed pose on
+0921. The question was whether a VLM can guard this by listing hands, and
+whether a quick YOLO finger model can do better.
+
+### The VLM (recorded as ADR-0016)
+
+Four sources, eight hands. Five were seen directly; three were inferred. The
+0921 annotation was marked "wrong by a lot" by the operator. The failures are
+all occlusion (a bouquet, a coat, a hand behind the back), which is exactly what
+a VLM cannot ground; a confidently wrong list is worse than no list. Seeing is
+also not the bottleneck: at cfg 1.0 only the mask and the prompt reach the
+sampler, so a prose list of hand positions cannot constrain it.
+
+### deepghs anime hand detector
+
+`deepghs/anime_hand_detection`, `hand_detect_v1.0_s`, 44.6 MB ONNX, 1 class
+("hand"), F1 threshold 0.395 (as shipped). Run through `ultralytics` at conf
+0.25, CPU, on the four sources and their current renders:
+
+| image | source | render | note |
+|---|---|---|---|
+| 0902 | 2 (0.79, 0.71) | **3** (0.81, 0.78, 0.56) | the third box is on a hand the source does not have |
+| 0722 | 0 | 2 (0.68, 0.44) | both source hands are behind the bouquet |
+| 0941 | 5 (0.52, 0.41, 0.39, 0.27, 0.27) | 4 (0.76, 0.72, 0.52, 0.31) | two boxes are duplicates on the coat hem, one is a shoe |
+| 0921 | 2 (0.74, 0.72) | 2 (0.83, 0.76) | one source box is on the sleeve/shoulder, not a hand |
+
+At its own 0.395 threshold 0941 drops to 3 source boxes and 3 render boxes (the
+shoe is 0.27). So: gloved visible hands are found well, occlusion is a total
+miss, and shoes/cuffs are false positives. A raw count gate would have flagged
+0902 correctly and failed on 0722 and 0941; a matched-position check needs NMS,
+a size/aspect filter and the source boxes as the reference, and has not been
+calibrated.
+
+### 21-keypoint hand pose
+
+Community YOLO26s fine-tune of the Ultralytics hand-keypoints dataset
+(MediaPipe pseudo-labels on 26k real hand photos; `vbalab/YOLO26s-pose-hands`,
+25 MB). On 0902's source the maximum confidence is 0.0068 at conf 0.001; the
+render returns nothing; tight crops around the detector's boxes also return
+nothing at conf 0.10. All four sources wear white gloves, so the finger creases
+and nails the model was trained on are absent. No maintained anime-specific
+21-keypoint hand model was found. Finger skeletons are not available for this
+corpus with quick weights.
+
+## 15. DWPose + the InstantX pose ControlNet: works, one fix, and 3 GB of VRAM
+
+The operator asked for a pose condition after the VLM route was rejected
+(ADR-0016). Two pieces were tested separately: DWPose generation, and the
+InstantX Qwen-Image ControlNet Union applied to the Edit merge.
+
+### DWPose generation
+
+Vendored `comfyui_controlnet_aux`'s dwpose package under `_eval/dwpose_src/`
+(YOLOX-L detector + dw-ll_ucoco_384), weights in `models/dwpose/` (gitignored).
+`pose_prepass.py` runs it on the **SafeFrame canvas**, not the raw PNG, so the
+skeleton lines up with what the sampler sees.
+
+The detector is sensitive to the composite: 0722's white dress on white gives
+0 poses, 0932's black suit on black gives 0. The prepass runs both a black and a
+white composite and keeps the better detection (16/27 changed background).
+
+Coverage, body >=14 keypoints and both wrists >0.3: **13 of 27**. The operator's
+five cases:
+
+| stem | body | wrists | hands |
+|---|---|---|---|
+| 0902 | 18 | 1.00 / 0.96 | 21/21 |
+| 0941 | 17 | 0.52 / 0.49 | 21/21 |
+| 0921 | 17 | 0.65 / 0.82 | 21/21 |
+| 0958 | 18 | 0.38 / 0.57 | 21/21 |
+| 0722 | 0 | -- | -- |
+
+0722's bouquet hides both hands and the white dress defeats the person detector
+on the framed canvas; the gate skips it.
+
+### The ControlNet
+
+ComfyUI already has `load_controlnet_qwen_instantx`, and the union matches its
+gate (`controlnet_blocks.0.weight` + `transformer_blocks.0.img_mlp.net.0.proj.weight`).
+No port was needed: `ControlNetLoader` + `ControlNetApplyAdvanced` on the
+existing conditioning, next to the DiffSynth inpaint model patch. Wired behind
+`--pose` (`--pose-strength`, `--pose-cn`, `--no-pose-gate`), off by default.
+
+Same seed, strength 1.0, 4 steps, chunk 1/4:
+
+| image | hand boxes default -> pose | pixels changed | verdict |
+|---|---|---|---|
+| 0902 | 3 -> **2** | 26.7 % | spare hand gone; chin + mecha hands kept |
+| 0941 | 4 -> 4 | 27.6 % | no change (one box is a shoe) |
+| 0921 | 2 -> 2 | 28.7 % | no change |
+| 0958 | 3 -> 3 | 28.9 % | no change |
+| 0722 | 2 -> 2 | 0.0 % | gate skipped, identical output |
+
+So the CN does condition the render (a quarter of the pixels move) but it only
+removes a spare limb when that limb contradicts a clean skeleton. A pose map is
+a positive hint, not a count constraint; it does not forbid extra limbs.
+
+### Cost: it does not fit beside the Q3 unet
+
+The union is 3.54 GB on disk and ~2.9 GB resident (server log `Unloaded
+partially: 2933.44 MB freed`). The unet alone sits at ~9.6 GB of the 12 GB card.
+ComfyUI therefore offloads the CN between prompts/steps:
+
+| setup | time per image |
+|---|---|
+| no CN, chunk 4 | ~50 s |
+| --pose, chunk 1, 0902 | 79 s |
+| --pose, chunk 4, four images | 141 s |
+| --pose --pose-strength 2.0, chunk 1, 0941 | 530 s/step, interrupted |
+
+No OOM, but at strength 2.0 on the tall 0941 canvas it was swapping every step.
+The path is not shippable on this card: one fix out of five cases for ~3 GB of
+VRAM and a 1.6-3x time cost.
+### Quantisation attempt: fp8 loads and destroys the render
+
+The union is BF16 already (181 tensors, 1.77 B parameters, 3.54 GB); no fp8 or
+GGUF build exists on the Hub (the only fp8 Qwen controlnets are DiffSynth
+canny/depth/inpaint). A naive `BF16 -> float8_e4m3fn` cast is 1.77 GB and does
+load, but the render is a blank white silhouette: one hand box at 0.26 instead
+of two, 38.2 % of pixels different from the BF16 CN. The cause is structural:
+`controlnet_config` uses `pick_operations(..., disable_fast_fp8=True)`, so the
+CN runs through `manual_cast`, which ignores the per-tensor scales fp8 needs;
+the small weights (most are < 0.016, below e4m3's normal minimum) collapse.
+A working fp8 CN needs a custom loader with scales, and even then 1.77 GB plus
+the 9.6 GB unet is 11.4 GB of 12. GGUF Q4_K_M would be lighter still, but
+ComfyUI-GGUF has no controlnet loader at all.
+
+The fp8 file was deleted; the result is recorded rather than kept.
+### CPU offload: slower than the swap it replaces
+
+`AmodalControlNetLoaderCPU` keeps the union on the CPU (devices retargeted and
+registered with `ModelPatcherDynamic`; otherwise `KeyError: device('cpu')`) and
+casts its block samples back to bf16 so the unet does not upcast. One 0902
+render, chunk 1:
+
+| variant | time/image | per step | note |
+|---|---|---|---|
+| GPU, resident | 79 s | ~8 s | the lucky state; the union fit |
+| GPU, chunk 4 | 141 s | ~60 s | union/unet swap |
+| CPU, bf16 | **389 s** | ~60 s | torch CPU bf16 is emulated on the 3900X |
+| CPU, fp32 | **636 s** | ~159 s | 7 GB network + 8.7 GB text encoder + unet host copies exceed 32 GB RAM |
+
+An isolated forward on this CPU measured 15.9 s/step in fp32, which is why the
+attempt looked promising; inside the server the same forward is 4-10x slower,
+because the text encoder is still resident and the process is swapping. The
+fp32 conversion made it worse, not better.
+
+CPU offload is also not overlappable: `control(x_t)` must finish before the unet
+step on the same `x_t`, and across images the control input depends on that
+image's own sampling trajectory. Hiding the unet (~4 s/step) behind the control
+net (~16-150 s/step) would save almost nothing.
+
+Verdict: on a 12 GB card with 32 GB RAM there is no placement or quantisation
+that makes this union affordable. It stays behind `--pose` (off) for a machine
+with more VRAM, and the CPU loader/flag are removed from the shipped path.
+
+## 16. v23 Q2_K: the smaller generator fits, and makes the pose CN redundant
+
+`Novice25/Qwen-Image-Edit-Rapid-AIO-GGUF` ships the NSFW line from v20 to v23 at
+Q2_K (7.44 GB), Q3_K (10.05), Q4_K (13.34), Q5_K (15.11). v23 Q2_K was tested
+against the shipped v19 Q3_K on the two hardest images, then with the pose CN on
+0902, 0941 and 0921 (4 steps, same seed):
+
+| image | source bust | v19 Q3_K | v23 Q2_K | v23 + pose CN |
+|---|---|---|---|---|
+| 0902 | 0.47 | 0.38 (spare hand, 3 boxes) | **0.46 (2 boxes)** | 0.45 (2 boxes) |
+| 0941 | 0.52 | 0.55 (4 boxes) | 0.55 (4 boxes) | 0.55 (4 boxes) |
+| 0921 | 0.05 | 0.22 (2 boxes) | not rendered | 0.22 (2 boxes) |
+
+- Time: 47 s/image at chunk 2 without the CN; 36 s/image with the CN at chunk 1
+  and 56 s/image at chunk 2. At 7.44 GB the unet leaves room for the 3.5 GB
+  union, so the pose path finally respects 12 GB.
+- The pose CN is now **redundant**: v23 Q2_K already renders 0902 with two hands
+  (the spare one is gone without any control), and the CN changes nothing on
+  0941/0921. The newer merge fixes the case the CN was bought for.
+- 0921's bust is 0.22 in both, so the earlier "v23 paints a bigger chest"
+  impression was wrong by the detector; do not trust the eye on one class.
+- Style is the open question: v23 is visibly paler and flatter than v19, the
+  realism direction ADR-0001 rejected v21+ for. On 0902 (a pale character) the
+  drift is small; on warm-skinned sources it is larger.
+- Q2_K itself shows no blockiness or noise on these two images; the pale look is
+  the merge, not the quantisation (a v23 Q3_K render would confirm it).
+
+Adopting v23 would mean a 27-image re-render plus `evaluate.py` and a fresh
+look at the LoRA/bust gates (0902 moved 0.38 -> 0.46 with the same gate). The
+pose CN can be dropped either way: it no longer buys anything.
+### v23 Q3_K vs Q2_K on the same three
+
+v23 Q3_K is 10.05 GB and runs at 49 s/image (chunk 3). The evaluate-style
+numbers, source vs render:
+
+| image | v19 Q3 | v23 Q2 | v23 Q3 |
+|---|---|---|---|
+| 0902 IoU / diffIn | 0.966 / 0.090 | 0.945 / 0.092 | 0.948 / 0.089 |
+| 0941 IoU / diffIn | 0.839 / 0.089 | 0.846 / 0.084 | 0.846 / 0.085 |
+| 0921 IoU / diffIn | 0.713 / 0.106 | -- | 0.716 / 0.108 |
+
+The Q2 -> Q3 delta is 0.003 IoU, far below the 0.05 noise floor, so the "Q2
+loses accuracy" impression is the flatter shading, not the silhouette or colour
+drift. Visually Q3 restores some contrast on 0902 and keeps the two-hand result
+(the spare hand is gone in both). The style is still a little paler than v19,
+less than Q2. A corpus run is needed to judge that on warm-skinned sources.
+### The workflow's small VLM cannot ground hands either (2026-11-06)
+
+Qwen2.5-VL-3B, the model `vlm_axes.py` already loads, on the four sources:
+
+| stem | answer | truth |
+|---|---|---|
+| 0902 | right hand at the face, 50 %, 25 %; left hidden | right correct; left is on the mecha |
+| 0722 | right hand holding the dress, 50 %, 75 % | both at the bouquet, 25-40 %, 25-30 % |
+| 0941 | right hand "holding a small object, 20 % from the top" | right at the chin, left at the coat hem |
+| 0921 | right hand holding a green bucket, 20 %, 30 % | both at the waist; the bucket is a prop at 80 %, 60 % |
+
+Two of four got the side of the raised hand right (0902, 0941); the position and
+what the hand was doing were vague or wrong, and one hallucinated a bucket. This
+confirms ADR-0016 with the local model rather than a frontier one, and closes
+the "VLM writes the hand position into the prompt" variant too: even correct
+sentences are tokens, and text saturates (ADR-0008).
+
+### Finger tags do not enlarge the hand mask
+
+SAM3 at threshold 0.25, % of canvas:
+
+| word | 0722 | 0941 |
+|---|---|---|
+| hand | 0.1 | 0.1 |
+| fingers | 0.1 | 0.1 |
+| thumb | 0.1 | 0.0 |
+| glove | 0.8 | 1.7 |
+| sleeve | 0.8 | 1.7 |
+
+The protection prompt is already `hand, fingers` and produces ~0.1 %, i.e. a
+few pixels: there is almost no hand protection to strengthen. More finger words
+cannot help. `glove`/`sleeve` are the only terms with signal, which is why the
+garment-side glove/sleeve prompt fixed 0902. The anime hand detector (0.7-0.8
+on the same hands) is the only instrument that actually sees them, so the
+remaining hand lever is its boxes used as a mask, not another text prompt.
+### Hand-box mask: empty on the two target cases (2026-11-06)
+
+`AmodalHandBoxes` ran the deepghs detector on the **SafeFrame canvas** (the
+image the sampler sees), conf 0.35, box grown 16 px, and joined the boxes to the
+clothing union before protection was subtracted. Mask area:
+
+| stem | hand boxes | clothes before | clothes after |
+|---|---|---|---|
+| 0902 | 2 boxes | 37 % | +boxes |
+| 0722 | **0.00 %** | 39.34 % | 39.34 % |
+| 0941 | **0.00 %** | 11.01 % | 11.01 % |
+
+The detector had found 0941's hands on the *raw source* (0.41 / 0.52) and 0902's
+(0.79 / 0.71), but on the framed canvas 0941 and 0722 return nothing at any
+threshold tried. Hand counts after the run are unchanged (0902 2 -> 2,
+0722 1 -> 1, 0941 4 -> 4). The node, its flag, the box dumps and the detector
+weights were removed; the mask PNGs remain in `output/` as the record. The
+remaining hand lever is the garment prompt (`glove, sleeve`), which fixed 0902
+and is already in the mask chain.
+### Protection-boundary levers: the baseline wins all seven (2026-11-06)
+
+Ran three variants on 0902, 0921, 0722, 0941, 0958, 0878 and 0547: `b0` (the
+shipped mask), `pg` (protect the SAM3 glove, grow 12) and `p16` (grow the hand
+protection to 16, no glove). Operator verdict: **`b0` is best on every image**.
+
+- `pg` does what it was meant to where the mask is a glove: 0722 keeps its long
+  white gloves with the arms connected, 0547 keeps the black opera gloves.
+- It over-reaches where "glove" fires on a sleeve: 0941 keeps the white coat
+  sleeve (protect mask 3.95 % -> 7.34 %), 0878 keeps a black dress sleeve behind
+  the pumpkin.
+- `p16` is the clean fallback on those two (sleeve gone, cuff kept) but drops
+  the gloves on 0722/0547.
+- Hand-box counts do not track the visual outcome: 0547 is 2/2/2 and `pg` is
+  visibly better for "keep gloves"; 0878 is 1/2/2 with no clear gain.
+
+No variant beat the baseline overall, so `--protect-glove` / `--protect-grow`
+were removed and the shipped mask is unchanged (`grow 4`, no glove prompt).
+
+Operator correction on the source set: **0958 is not misdrawn**. The cloth is
+falling off and the models read the pose differently from a human; it is a hard
+but valid image and stays in evaluation. AGENTS.md and ADR-0010 were corrected.
+### A correct pose sentence does not move the pose (2026-11-06)
+
+The 27B VLM's description of 0941 ("right hand raised to the chin, the other
+hanging at the hip") is correct, and was appended verbatim to the prompt as
+`--prompt-extra`. Same seed, v23 Q3, one image each:
+
+| render | hand boxes | pixels changed vs baseline | reading |
+|---|---|---|---|
+| `_t0` baseline | 4 | -- | -- |
+| `_pt` + sentence | 4 | 27.6 %, mean abs 2.9/255 | shading noise, same arm/hand layout |
+
+So even a correct, specific sentence is just tokens at cfg 1.0: the latent
+already carries the source pose and the sampler does not read the sentence as a
+constraint. The 27B can be an offline prepass (8.5 GB alone, so it cannot share
+the card with the 9.6 GB unet), but the text route is not the lever for a
+compound arm pose.
+

@@ -53,7 +53,7 @@ ComfyUI_windows_portable_v043/
 
 | role | file |
 |---|---|
-| diffusion (GGUF) | `Qwen-Rapid-NSFW-v19_Q3_K.gguf` |
+| diffusion (GGUF) | `Qwen-Rapid-NSFW-v23_Q3_K.gguf` |
 | text encoder | `qwen_2.5_vl_7b_fp8_scaled.safetensors` |
 | VAE | `qwen_image_vae.safetensors` |
 | inpaint ControlNet | `qwen_image_inpaint_diffsynth_controlnet.safetensors` |
@@ -116,7 +116,7 @@ source PNG
    │                       (outfit · garments · face · hands · footwear)
    ├─ AmodalMaskUnionFill  fill holes per component, grow 16 px
    ├─ AmodalTextEncode     prompt + reference latent at the exact sampling size
-   ├─ KSampler             v19, 4 steps, euler_ancestral/beta, cfg 1.0
+   ├─ KSampler             v23, 4 steps, euler_ancestral/beta, cfg 1.0
    ├─ AmodalFinalize       composite back, resize to source size, restore alpha
    └─ BiRefNet             clean alpha
 ```
@@ -149,7 +149,7 @@ redrawn older, taller or in a different outfit gets its own parameters.
 |---|---|---|
 | `--dir` | `.` | subfolder of `input/`; default is `input/` itself |
 | `--chunk` | 6 | images per ComfyUI prompt (model loads once per chunk) |
-| `--steps` | 4 | v19 is a 4-step model; 6 for A/B only |
+| `--steps` | 4 | v23 is a 4-step model; 6 for A/B only |
 | `--seed` | 123456789 | sampler seed |
 | `--limit` | 0 | stop after N images |
 | `--force` | off | re-render even if `_amodal.png` exists |
@@ -369,6 +369,11 @@ HOST   = "http://127.0.0.1:8199"
 The 12 GB card cannot keep unet, text encoder and SAM3 resident together, so
 loads happen constantly. `--max-mp 1.0` and `--sam-refine 1` are the remaining
 safe levers.
+
+That is a hard constraint, not an observation: a lever that only works with more
+VRAM is not a solution. The pose ControlNet is the worked example — 3.5 GB of
+weights beside the 9.6 GB unet, and swap, CPU offload and fp8 each ended slower
+than the baseline or broken (`_eval/FINDINGS.md` section 15).
 
 Chunking only helps *because* the default stage ordering runs detect-all,
 encode-all, sample-all (ADR-0013): before that, every image in a chunk reloaded

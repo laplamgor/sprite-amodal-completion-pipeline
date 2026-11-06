@@ -583,8 +583,8 @@ class ControlnetInPlace:
 
     The stock node (`QwenImageDiffsynthControlnet`) does `model.clone()` and
     registers the patch on the clone. ComfyUI identifies a loaded model by
-    ModelPatcher identity — `LoadedModel.__eq__` is `self.model is other.model`
-    — so each image presents a "different" model and the 9.4 GB unet is unloaded
+    ModelPatcher identity ??`LoadedModel.__eq__` is `self.model is other.model`
+    ??so each image presents a "different" model and the 9.4 GB unet is unloaded
     and reloaded between images. Measured at 6-37 s per image, which on a
     100-image batch is the single largest remaining cost (ADR-0014).
 

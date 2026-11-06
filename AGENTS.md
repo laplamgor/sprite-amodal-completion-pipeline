@@ -20,6 +20,10 @@ and ask — do not reconstruct its history from memory.
 - **Fully automated.** No manual masking, no per-image prompt edits, no
   per-character anchoring. All parameters are keyed by *image stem*, never by
   character. The same file must always render the same way.
+- **Must fit a 12 GB CUDA GPU** (RTX 4070 Ti). A lever that needs more VRAM is
+  not a solution, however good it looks: the 3.5 GB pose ControlNet beside the
+  9.6 GB Q3 unet does not fit, and swap, CPU offload and fp8 were all slower
+  than the baseline or broken (`_eval/FINDINGS.md` section 15).
 - Preserve hair, footwear, accessories, props, face, mouth and fingers. The mask
   is built by subtraction for exactly this reason.
 - `KSampler` runs at `cfg 1.0`, so the negative conditioning is ignored — every
@@ -46,9 +50,10 @@ must be written down.
   as 0.00. Check visually before concluding "no change".
 - Prefer 5 pairwise comparisons to one eyeballed A/B, and prefer a same-image
   controlled test to a cross-image correlation.
-- `0958_6353_zsnmjonjfpan_v79` is a misdrawn source (wrong pose). It stays in
-  `input/` but is excluded from every evaluation; do not tune anything to fix
-  its scores.
+- `0958_6353_zsnmjonjfpan_v79` is **not** misdrawn; the operator corrected that
+  reading (2026-11-06). It is a hard but valid source — the cloth is falling
+  off and models read the pose differently from a human. Keep it in evaluation;
+  do not exclude it, and treat its low score as the real challenge it is.
 
 ## Keeping the records current
 
@@ -71,6 +76,13 @@ must be written down.
   answers identically for 27/35 images (ADR-0007).
 - Geometry for `build`: 0.616 vs ~0.70, and stacking it lowered the score.
 - `limb`, `age_imp`, `hip_bias`: removed for cause, with numbers (ADR-0004).
+- A VLM as a hand/arm pose verifier: 1 of 4 annotations wrong on the operator's
+  own failure cases, and the failures are occlusion (ADR-0016). Do not prompt a
+  VLM about hands again.
+- A 21-keypoint hand model for finger skeletons on this corpus: a real-photo
+  YOLO returns nothing (max 0.0068 at conf 0.001) because the hands are gloved.
+  The anime hand *detector* (deepghs, boxes only) finds visible gloved hands but
+  misses occlusion and fires on shoes/cuffs (FINDINGS 14).
 
 ## Workflow
 

@@ -20,7 +20,7 @@ import comfy_client as t  # noqa: E402
 INPUT = C.INPUT
 OUTPUT = C.OUTPUT
 
-UNET = "Qwen-Rapid-NSFW-v19_Q3_K.gguf"
+UNET = "Qwen-Rapid-NSFW-v23_Q3_K.gguf"
 TE = "qwen_2.5_vl_7b_fp8_scaled.safetensors"
 VAE = "qwen_image_vae.safetensors"
 CN = "qwen_image_inpaint_diffsynth_controlnet.safetensors"
@@ -751,7 +751,8 @@ def main():
                                     sampler, scheduler, a.tag, a.legacy, a.dump_mask,
                                     a.grow, a.parse, a.protect_threshold, a.hair_protect,
                                     not a.no_footwear_protect,
-                                    not a.no_equipment_protect, denoise, extra,
+                                    not a.no_equipment_protect,
+                                    denoise, extra,
                                     a.max_mp, a.sam_refine, lora, lora_strength,
                                     not a.no_probe_merge, not a.no_inplace_patch, base)
             wf.update(nodes)
